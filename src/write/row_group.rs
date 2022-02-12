@@ -3,6 +3,7 @@ use std::io::Write;
 use futures::AsyncWrite;
 use parquet_format_async_temp::{ColumnChunk, RowGroup};
 
+use crate::write::FileEncryptor;
 use crate::{
     compression::Compression,
     error::{ParquetError, Result},
@@ -62,19 +63,30 @@ pub fn write_row_group<
     compression: Compression,
     columns: DynIter<'a, std::result::Result<DynStreamingIterator<'a, CompressedPage, E>, E>>,
     num_rows: usize,
+    encryptor: Option<FileEncryptor>,
+    ordinal: i16,
 ) -> Result<(RowGroup, u64)>
 where
     W: Write,
     ParquetError: From<E>,
     E: std::error::Error,
 {
-    let column_iter = descriptors.iter().zip(columns);
+    let column_iter = descriptors.iter().zip(columns).enumerate();
 
     let initial = offset;
+    let encryptor =  encryptor.map(|e| (e.get_block_encryptor_column(),
+                                        e.file_aad().with_row_group_ordinal(ordinal)));
     let columns = column_iter
-        .map(|(descriptor, page_iter)| {
-            let (column, size) =
-                write_column_chunk(writer, offset, descriptor, compression, page_iter?)?;
+        .map(|(column_ordinal, (descriptor, page_iter))| {
+            let aad_base = vec![b'1']; //
+            let (column, size) = write_column_chunk(
+                writer,
+                offset,
+                descriptor,
+                compression,
+                page_iter?,
+                encryptor,
+            )?;
             offset += size;
             Ok(column)
         })
@@ -103,7 +115,7 @@ where
             sorting_columns: None,
             file_offset,
             total_compressed_size: None,
-            ordinal: None,
+            ordinal: Some(ordinal),
         },
         bytes_written,
     ))
@@ -132,14 +144,14 @@ where
     let mut columns = vec![];
     for (descriptor, page_iter) in column_iter {
         let (spec, size) =
-            write_column_chunk_async(writer, offset, descriptor, compression, page_iter?).await?;
+            write_column_chunk_async(writer, offset, descriptor, compression, file_offset?).await?;
         offset += size as u64;
         columns.push(spec);
     }
     let bytes_written = offset - initial;
 
     // compute row group stats
-    let file_offest = columns
+    let file_offset = columns
         .iter()
         .next()
         .map(|column_chunk| {
@@ -158,7 +170,7 @@ where
             total_byte_size,
             num_rows: num_rows as i64,
             sorting_columns: None,
-            file_offset: file_offest,
+            file_offset,
             total_compressed_size: None,
             ordinal: None,
         },

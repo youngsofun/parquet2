@@ -11,10 +11,12 @@ mod stream;
 pub use stream::FileStreamer;
 
 mod dyn_iter;
+
 pub use dyn_iter::{DynIter, DynStreamingIterator};
 
 pub use compression::{compress, Compressor};
 
+pub use crate::crypto::file_encryptor::FileEncryptor;
 pub use file::FileWriter;
 
 pub use row_group::ColumnOffsetsMetadata;

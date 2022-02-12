@@ -9,6 +9,9 @@ use parquet_format_async_temp::thrift::protocol::{
 use parquet_format_async_temp::{DictionaryPageHeader, Encoding, PageType};
 
 use crate::error::{ParquetError, Result};
+use crate::crypto::aad::{ModuleType, AAD};
+use crate::crypto::block_encryptor::BlockEncryptor;
+
 use crate::page::{
     CompressedDataPage, CompressedDictPage, CompressedPage, DataPageHeader, ParquetPageHeader,
 };
@@ -41,28 +44,135 @@ pub struct PageWriteSpec {
     pub statistics: Option<Arc<dyn Statistics>>,
 }
 
+fn encode_page_header(header: &ParquetPageHeader) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(100); // todo!
+    let mut protocol = TCompactOutputProtocol::new(&buf);
+    header.write_to_out_protocol(&mut protocol)?;
+    buf
+}
+
+fn do_write_page_e<W: Write>(
+    writer: &mut W,
+    header: &ParquetPageHeader,
+    compressed_page: &CompressedPage,
+    encryptor: BlockEncryptor,
+    aad: AAD,
+) -> Result<(usize, usize)> {
+    let header_buf = encode_page_header(header);
+    let r = match &compressed_page {
+        CompressedPage::Data(compressed_page) => {
+            let header_size = encryptor.write(
+                writer,
+                &header_buf,
+                &aad.column_chunk_aad(ModuleType::DataPageHeader),
+            )?;
+            let data_size = encryptor.write(
+                writer,
+                &compressed_page.buffer,
+                &aad.column_chunk_aad(ModuleType::DataPage),
+            )?;
+            (header_size, header_size + data_size)
+        }
+        CompressedPage::Dict(compressed_page) => {
+            let header_size = encryptor.write(
+                writer,
+                &header_buf,
+                &aad.column_chunk_aad(ModuleType::DictionaryPageHeader),
+            )?;
+            let data_size = encryptor.write(
+                writer,
+                &compressed_page.buffer,
+                &aad.column_chunk_aad(ModuleType::DictionaryPage),
+            )?;
+            (header_size, header_size + data_size)
+        }
+    };
+    Ok(r)
+}
+
+async fn do_write_page_async_e<W: AsyncWrite + Unpin + Send>(
+    writer: &mut W,
+    header: &ParquetPageHeader,
+    compressed_page: &CompressedPage,
+    encryptor: BlockEncryptor,
+    aad: AAD,
+) -> Result<(usize, usize)> {
+    let header_buf = encode_page_header(header);
+    let r = match &compressed_page {
+        CompressedPage::Data(compressed_page) => {
+            let header_size = encryptor
+                .write_async(
+                    writer,
+                    &header_buf,
+                    &aad.column_chunk_aad(ModuleType::DataPageHeader),
+                )
+                .await?;
+            let data_size = encryptor
+                .write_async(
+                    writer,
+                    &compressed_page.buffer,
+                    &aad.column_chunk_aad(ModuleType::DataPage),
+                )
+                .await?;
+            (header_size, header_size + data_size)
+        }
+        CompressedPage::Dict(compressed_page) => {
+            let header_size = encryptor
+                .write_async(
+                    writer,
+                    &header_buf,
+                    &aad.column_chunk_aad(ModuleType::DictionaryPageHeader),
+                )
+                .await?;
+            let data_size = encryptor
+                .write_async(
+                    writer,
+                    &compressed_page.buffer,
+                    &aad.column_chunk_aad(ModuleType::DictionaryPage),
+                )
+                .await?;
+            (header_size, header_size + data_size)
+        }
+    };
+    Ok(r)
+}
+
+pub fn do_write_page<W: Write>(
+    writer: &mut W,
+    header: &ParquetPageHeader,
+    compressed_page: &CompressedPage,
+) -> Result<(usize, usize)> {
+    let header_size = write_page_header(writer, header)?;
+    let mut bytes_written = header_size;
+
+    bytes_written += match &compressed_page {
+        CompressedPage::Data(compressed_page) => {
+            writer.write_all(&compressed_page.buffer)?;
+            compressed_page.buffer.len()
+        }
+        CompressedPage::Dict(compressed_page) => {
+            writer.write_all(&compressed_page.buffer)?;
+            compressed_page.buffer.len()
+        }
+    };
+
+    Ok((header_size, bytes_written))
+}
+
 pub fn write_page<W: Write>(
     writer: &mut W,
     offset: u64,
     compressed_page: &CompressedPage,
+    encryptor: Option<(BlockEncryptor, AAD)>,
 ) -> Result<PageWriteSpec> {
     let header = match &compressed_page {
         CompressedPage::Data(compressed_page) => assemble_data_page_header(compressed_page),
         CompressedPage::Dict(compressed_page) => assemble_dict_page_header(compressed_page),
     }?;
-
-    let header_size = write_page_header(writer, &header)?;
-    let mut bytes_written = header_size as u64;
-
-    bytes_written += match &compressed_page {
-        CompressedPage::Data(compressed_page) => {
-            writer.write_all(&compressed_page.buffer)?;
-            compressed_page.buffer.len() as u64
-        }
-        CompressedPage::Dict(compressed_page) => {
-            writer.write_all(&compressed_page.buffer)?;
-            compressed_page.buffer.len() as u64
-        }
+    let (header_size, bytes_written) = if let Some((en, aad)) = encryptor {
+        do_write_page_e(writer, &header, compressed_page, en, aad);
+    } else {
+        do_write_page(writer, &header, compressed_page);
     };
 
     let statistics = match &compressed_page {
@@ -72,35 +182,50 @@ pub fn write_page<W: Write>(
 
     Ok(PageWriteSpec {
         header,
-        header_size,
         offset,
-        bytes_written,
         statistics,
+        header_size: header_size as u64,
+        bytes_written: bytes_written as u64,
     })
+}
+
+async fn do_write_page_async<W: AsyncWrite + Unpin + Send>(
+    writer: &mut W,
+    header: &ParquetPageHeader,
+    compressed_page: &CompressedPage,
+) -> Result<(usize, usize)> {
+    let header_size = write_page_header_async(writer, header)?;
+    let mut bytes_written = header_size;
+
+    bytes_written += match &compressed_page {
+        CompressedPage::Data(compressed_page) => {
+            writer.write_all(&compressed_page.buffer).await?;
+            compressed_page.buffer.len() as u64
+        }
+        CompressedPage::Dict(compressed_page) => {
+            writer.write_all(&compressed_page.buffer).await?;
+            compressed_page.buffer.len() as u64
+        }
+    };
+
+    Ok((header_size, bytes_written))
 }
 
 pub async fn write_page_async<W: AsyncWrite + Unpin + Send>(
     writer: &mut W,
     offset: u64,
     compressed_page: &CompressedPage,
+    encryptor: Option<(BlockEncryptor, AAD)>,
 ) -> Result<PageWriteSpec> {
     let header = match &compressed_page {
         CompressedPage::Data(compressed_page) => assemble_data_page_header(compressed_page),
         CompressedPage::Dict(compressed_page) => assemble_dict_page_header(compressed_page),
     }?;
 
-    let header_size = write_page_header_async(writer, &header).await?;
-    let mut bytes_written = header_size as u64;
-
-    bytes_written += match &compressed_page {
-        CompressedPage::Data(compressed_page) => {
-            writer.write_all(&compressed_page.buffer).await?;
-            compressed_page.buffer.len() as u64
-        }
-        CompressedPage::Dict(compressed_page) => {
-            writer.write_all(&compressed_page.buffer).await?;
-            compressed_page.buffer.len() as u64
-        }
+    let (header_size, bytes_written) = if let Some((en, aad)) = encryptor {
+        do_write_page_async_e(writer, &header, compressed_page, en, aad);
+    } else {
+        do_write_page_async(writer, &header, compressed_page);
     };
 
     let statistics = match &compressed_page {
@@ -110,10 +235,10 @@ pub async fn write_page_async<W: AsyncWrite + Unpin + Send>(
 
     Ok(PageWriteSpec {
         header,
-        header_size,
         offset,
-        bytes_written,
         statistics,
+        header_size: header_size as u64,
+        bytes_written: bytes_written as u64,
     })
 }
 
@@ -174,9 +299,9 @@ fn assemble_dict_page_header(page: &CompressedDictPage) -> Result<ParquetPageHea
 }
 
 /// writes the page header into `writer`, returning the number of bytes used in the process.
-fn write_page_header<W: Write>(mut writer: &mut W, header: &ParquetPageHeader) -> Result<u64> {
+fn write_page_header<W: Write>(mut writer: &mut W, header: &ParquetPageHeader) -> Result<usize> {
     let mut protocol = TCompactOutputProtocol::new(&mut writer);
-    Ok(header.write_to_out_protocol(&mut protocol)? as u64)
+    Ok(header.write_to_out_protocol(&mut protocol)?)
 }
 
 /// writes the page header into `writer`, returning the number of bytes used in the process.

@@ -8,10 +8,13 @@ use parquet_format_async_temp::thrift::protocol::{
 };
 use parquet_format_async_temp::{ColumnChunk, ColumnMetaData};
 
+use crate::crypto::aad::ModuleType;
+use crate::crypto::block_encryptor::BlockEncryptor;
 use crate::statistics::serialize_statistics;
 use crate::FallibleStreamingIterator;
 use crate::{
     compression::Compression,
+    crypto::aad::AAD,
     encoding::Encoding,
     error::{ParquetError, Result},
     metadata::ColumnDescriptor,
@@ -29,6 +32,7 @@ pub fn write_column_chunk<'a, W, E>(
     descriptor: &ColumnDescriptor,
     compression: Compression,
     mut compressed_pages: DynStreamingIterator<'a, CompressedPage, E>,
+    encryptor: Option<(BlockEncryptor, AAD)>,
 ) -> Result<(ColumnChunk, u64)>
 where
     W: Write,
@@ -36,18 +40,20 @@ where
     E: std::error::Error,
 {
     // write every page
-
     let initial = offset;
 
     let mut specs = vec![];
+    let mut page_ordinal = 0;
     while let Some(compressed_page) = compressed_pages.next()? {
-        let spec = write_page(writer, offset, compressed_page)?;
+        page_ordinal += 1;
+        let encryptor = encryptor.map(|(e, a)| (e, a.with_page_ordinal(page_ordinal)));
+        let spec = write_page(writer, offset, compressed_page, encryptor)?;
         offset += spec.bytes_written;
         specs.push(spec);
     }
     let mut bytes_written = offset - initial;
 
-    let column_chunk = build_column_chunk(&specs, descriptor, compression)?;
+    let column_chunk = build_column_chunk(&specs, descriptor, compression, encryptor)?;
 
     // write metadata
     let mut protocol = TCompactOutputProtocol::new(writer);
@@ -63,6 +69,7 @@ pub async fn write_column_chunk_async<W, E>(
     descriptor: &ColumnDescriptor,
     compression: Compression,
     mut compressed_pages: DynStreamingIterator<'_, CompressedPage, E>,
+    encryptor: Option<(BlockEncryptor, AAD)>,
 ) -> Result<(ColumnChunk, usize)>
 where
     W: AsyncWrite + Unpin + Send,
@@ -72,14 +79,17 @@ where
     let initial = offset;
     // write every page
     let mut specs = vec![];
+    let mut page_ordinal = 0;
     while let Some(compressed_page) = compressed_pages.next()? {
-        let spec = write_page_async(writer, offset, compressed_page).await?;
+        page_ordinal += 1;
+        let encryptor = encryptor.clone().map(|(e, a)| (e, a.with_page_ordinal(page_ordinal)));
+        let spec = write_page_async(writer, offset, compressed_page, encryptor).await?;
         offset += spec.bytes_written;
         specs.push(spec);
     }
     let mut bytes_written = (offset - initial) as usize;
 
-    let column_chunk = build_column_chunk(&specs, descriptor, compression)?;
+    let column_chunk = build_column_chunk(&specs, descriptor, compression, encryptor)?;
 
     // write metadata
     let mut protocol = TCompactOutputStreamProtocol::new(writer);
@@ -95,6 +105,7 @@ fn build_column_chunk(
     specs: &[PageWriteSpec],
     descriptor: &ColumnDescriptor,
     compression: Compression,
+    encryptor: Option<(BlockEncryptor, AAD)>,
 ) -> Result<ColumnChunk> {
     // compute stats to build header at the end of the chunk
 
@@ -184,15 +195,40 @@ fn build_column_chunk(
         bloom_filter_offset: None,
     };
 
-    Ok(ColumnChunk {
-        file_path: None, // same file for now.
-        file_offset: data_page_offset + total_compressed_size,
-        meta_data: Some(metadata),
-        offset_index_offset: None,
-        offset_index_length: None,
-        column_index_offset: None,
-        column_index_length: None,
-        crypto_metadata: None,
-        encrypted_column_metadata: None,
-    })
+    if let Some((en, aad)) = encryptor {
+        let encrypted_column_metadata = Some(en.encrypt(
+            &encode_column_metadata(&metadata),
+            &aad.column_chunk_aad(ModuleType::ColumnMetaData),
+        ));
+        Ok(ColumnChunk {
+            file_path: None, // same file for now.
+            file_offset: data_page_offset + total_compressed_size,
+            meta_data: None,
+            offset_index_offset: None,
+            offset_index_length: None,
+            column_index_offset: None,
+            column_index_length: None,
+            crypto_metadata: Some(en.get_column_crypto_metadata()),
+            encrypted_column_metadata,
+        })
+    } else {
+        Ok(ColumnChunk {
+            file_path: None, // same file for now.
+            file_offset: data_page_offset + total_compressed_size,
+            meta_data: Some(metadata),
+            offset_index_offset: None,
+            offset_index_length: None,
+            column_index_offset: None,
+            column_index_length: None,
+            crypto_metadata: None,
+            encrypted_column_metadata: None,
+        })
+    }
+}
+
+fn encode_column_metadata(column_metadata: &ColumnMetaData) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(100); // todo!
+    let mut protocol = TCompactOutputProtocol::new(&buf);
+    column_metadata.write_to_out_protocol(&mut protocol)?;
+    buf
 }

@@ -6,19 +6,17 @@ use parquet_format_async_temp::thrift::protocol::TCompactOutputProtocol;
 use parquet_format_async_temp::thrift::protocol::TOutputProtocol;
 use parquet_format_async_temp::RowGroup;
 
+use crate::crypto::aad::AAD;
+use crate::crypto::block_encryptor::BlockEncryptor;
 pub use crate::metadata::KeyValue;
+use crate::write::FileEncryptor;
 use crate::{
     error::{ParquetError, Result},
     metadata::SchemaDescriptor,
-    FOOTER_SIZE, PARQUET_MAGIC,
+    FOOTER_SIZE, PARQUET_MAGIC, PARQUET_MAGIC_EF,
 };
 
 use super::{row_group::write_row_group, RowGroupIter, WriteOptions};
-
-pub(super) fn start_file<W: Write>(writer: &mut W) -> Result<u64> {
-    writer.write_all(&PARQUET_MAGIC)?;
-    Ok(PARQUET_MAGIC.len() as u64)
-}
 
 pub(super) fn end_file<W: Write>(mut writer: &mut W, metadata: FileMetaData) -> Result<u64> {
     // Write metadata
@@ -38,6 +36,35 @@ pub(super) fn end_file<W: Write>(mut writer: &mut W, metadata: FileMetaData) -> 
     Ok(metadata_len as u64 + FOOTER_SIZE)
 }
 
+pub(super) fn end_file_e<W: Write>(
+    mut writer: &mut W,
+    metadata: FileMetaData,
+    encryptor: BlockEncryptor,
+    aad: AAD,
+) -> Result<u64> {
+    // write FileCryptoMetaData
+    let file_crypto_metadata = encryptor.get_file_crypto_metadata();
+    let mut protocol = TCompactOutputProtocol::new(&mut writer);
+    let crypto_metadata_len = file_crypto_metadata.write_to_out_protocol(&mut protocol)?;
+    protocol.flush()?;
+
+    // Write metadata
+    let metadata_encoded = encode_thrift(&metadata);
+    let metadata_len = encryptor.write(&mut writer, &metadata_encoded, &aad.footer_add());
+    let footer_len = metadata_len + crypto_metadata_len;
+
+    // Write footer
+    let footer_bytes = footer_len.to_le_bytes();
+    let mut footer_buffer = [0u8; FOOTER_SIZE as usize];
+    (0..4).for_each(|i| {
+        footer_buffer[i] = footer_bytes[i];
+    });
+
+    (&mut footer_buffer[4..]).write_all(&PARQUET_MAGIC_EF)?;
+    writer.write_all(&footer_buffer)?;
+    Ok(footer_len as u64 + FOOTER_SIZE)
+}
+
 /// An interface to write a parquet file.
 /// Use `start` to write the header, `write` to write a row group,
 /// and `end` to write the footer.
@@ -46,7 +73,7 @@ pub struct FileWriter<W: Write> {
     schema: SchemaDescriptor,
     options: WriteOptions,
     created_by: Option<String>,
-
+    encryptor: Option<FileEncryptor>,
     offset: u64,
     row_groups: Vec<RowGroup>,
 }
@@ -72,10 +99,13 @@ impl<W: Write> FileWriter<W> {
         options: WriteOptions,
         created_by: Option<String>,
     ) -> Self {
+        let encryptor = Some(FileEncryptor::new());
+        // todo: check options.encryptor with schema
         Self {
             writer,
             schema,
             options,
+            encryptor,
             created_by,
             offset: 0,
             row_groups: vec![],
@@ -84,7 +114,13 @@ impl<W: Write> FileWriter<W> {
 
     /// Writes the header of the file
     pub fn start(&mut self) -> Result<()> {
-        self.offset = start_file(&mut self.writer)? as u64;
+        let magic = if self.encryptor.is_none() {
+            &PARQUET_MAGIC
+        } else {
+            &PARQUET_MAGIC_EF
+        };
+        self.writer.write_all(magic)?;
+        self.offset = magic.len() as u64;
         Ok(())
     }
 
@@ -108,6 +144,8 @@ impl<W: Write> FileWriter<W> {
             self.options.compression,
             row_group,
             num_rows,
+            self.encryptor.clone(),
+            self.row_groups.len() as i16,
         )?;
         self.offset += size;
         self.row_groups.push(group);
@@ -117,6 +155,7 @@ impl<W: Write> FileWriter<W> {
     /// Writes the footer of the parquet file. Returns the total size of the file and the
     /// underlying writer.
     pub fn end(mut self, key_value_metadata: Option<Vec<KeyValue>>) -> Result<(u64, W)> {
+        let footer_encryptor = BlockEncryptor::new();
         // compute file stats
         let num_rows = self.row_groups.iter().map(|group| group.num_rows).sum();
 
@@ -132,7 +171,17 @@ impl<W: Write> FileWriter<W> {
             None,
         );
 
-        let len = end_file(&mut self.writer, metadata)?;
+        let len = if let Some(e) = self.encryptor {
+            end_file_e(
+                &mut self.writer,
+                metadata,
+                e.get_block_encryptor_file(),
+                e.file_aad(),
+            )?;
+        } else {
+            end_file(&mut self.writer, metadata)?;
+        };
+
         Ok((self.offset + len, self.writer))
     }
 }
@@ -170,7 +219,14 @@ mod tests {
         // read it again:
         let result = read_metadata(&mut Cursor::new(a));
         assert!(result.is_ok());
-
         Ok(())
     }
+}
+
+// todo: use macro
+fn encode_thrift(file_metadata: &FileMetaData) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(100); // todo!
+    let mut protocol = TCompactOutputProtocol::new(&buf);
+    file_metadata.write_to_out_protocol(&mut protocol)?;
+    buf
 }
