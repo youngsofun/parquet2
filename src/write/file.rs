@@ -10,15 +10,10 @@ pub use crate::metadata::KeyValue;
 use crate::{
     error::{ParquetError, Result},
     metadata::SchemaDescriptor,
-    FOOTER_SIZE, PARQUET_MAGIC,
+    FOOTER_SIZE, PARQUET_MAGIC, PARQUET_MAGIC_EF,
 };
 
 use super::{row_group::write_row_group, RowGroupIter, WriteOptions};
-
-pub(super) fn start_file<W: Write>(writer: &mut W) -> Result<u64> {
-    writer.write_all(&PARQUET_MAGIC)?;
-    Ok(PARQUET_MAGIC.len() as u64)
-}
 
 pub(super) fn end_file<W: Write>(mut writer: &mut W, metadata: FileMetaData) -> Result<u64> {
     // Write metadata
@@ -72,6 +67,7 @@ impl<W: Write> FileWriter<W> {
         options: WriteOptions,
         created_by: Option<String>,
     ) -> Self {
+        // todo: check options.encryptor with schema
         Self {
             writer,
             schema,
@@ -84,7 +80,9 @@ impl<W: Write> FileWriter<W> {
 
     /// Writes the header of the file
     pub fn start(&mut self) -> Result<()> {
-        self.offset = start_file(&mut self.writer)? as u64;
+        let magic = if self.options.encryptor.is_none() {&PARQUET_MAGIC} else {&PARQUET_MAGIC_EF};
+        writer.write_all(magic)?;
+        self.offset = magic.len() as u64;
         Ok(())
     }
 

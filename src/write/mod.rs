@@ -11,11 +11,15 @@ mod stream;
 pub use stream::FileStreamer;
 
 mod dyn_iter;
+mod encrypt;
+
 pub use dyn_iter::{DynIter, DynStreamingIterator};
 
 pub use compression::{compress, Compressor};
 
 pub use file::FileWriter;
+pub use encrypt::FileEncryptor;
+
 
 pub use row_group::ColumnOffsetsMetadata;
 
@@ -34,6 +38,7 @@ pub struct WriteOptions {
     pub compression: Compression,
     /// Which Parquet version to use
     pub version: Version,
+    pub encryptor: Option<FileEncryptor>
 }
 
 /// The parquet version to use
