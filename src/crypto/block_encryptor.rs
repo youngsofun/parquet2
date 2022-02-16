@@ -14,11 +14,46 @@ impl BlockEncryptor {
     }
 }
 
+use aes_gcm::{Aes128Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, NewAead, AeadInPlace, Payload};
+
+
+trait ParquetBlockEncryptor {
+    fn encrypt(&self, plaintext: &[u8], aad: &[u8],  buf: &mut [u8], write_length: bool);
+    fn encrypt_inpace(&self, plaintext: &[u8], aad: &[u8],  buf: &mut [u8], write_length: bool);
+
+
+}
+
+
+
+struct AesGcm128 {}
+
+
+
+fn gcm(key : &[u8], nonce:&[u8],  plain_text: &[u8], aad: &[u8]) -> Vec<u8>{
+    let key  = Key::from_slice(key);
+    let cipher = Aes128Gcm::new(key);
+    let nonce = Nonce::from_slice(nonce);
+    let v1=  cipher.encrypt(nonce, Payload{ msg: plain_text, aad })
+        .expect("encryption failure!");
+    let v2=  cipher.encrypt(nonce, Payload{ msg: plain_text, aad })
+        .expect("encryption failure!");
+    assert_eq!(v1, v2);
+    v1
+}
+
+
+
+
+
 impl BlockEncryptor {
+
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
         vec![b'1']
     }
-    pub fn write<W: Write>(
+
+    fn write<W: Write>(
         &self,
         mut writer: &mut W,
         plaintext: &[u8],
@@ -28,7 +63,8 @@ impl BlockEncryptor {
         writer.write_all(&buf)?;
         Ok(buf.len())
     }
-    pub async fn write_async<W: AsyncWrite + Unpin + Send>(
+
+    async fn write_async<W: AsyncWrite + Unpin + Send>(
         &self,
         writer: &mut W,
         plaintext: &[u8],

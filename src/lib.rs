@@ -14,6 +14,7 @@ pub mod schema;
 pub mod statistics;
 pub mod types;
 pub mod write;
+mod thrift_io;
 
 pub use streaming_decompression::fallible_streaming_iterator;
 pub use streaming_decompression::FallibleStreamingIterator;
