@@ -4,6 +4,7 @@
 #[macro_use]
 pub mod error;
 pub mod compression;
+mod crypto;
 pub mod encoding;
 pub mod metadata;
 pub mod page;
