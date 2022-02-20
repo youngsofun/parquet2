@@ -6,6 +6,7 @@ pub struct AAD {
     page_ordinal: i16,
 }
 
+#[allow(dead_code)]
 #[derive(Copy, Clone)]
 pub enum ModuleType {
     Footer = 0,
@@ -46,14 +47,14 @@ impl AAD {
     pub(crate) fn with_column_ordinal(&self, ordinal: i16) -> Self {
         AAD {
             column_ordinal: ordinal,
-            ..*self.clone()
+            ..self.clone()
         }
     }
 
     pub(crate) fn with_page_ordinal(&self, ordinal: i16) -> Self {
         AAD {
             page_ordinal: ordinal,
-            ..*self.clone()
+            ..self.clone()
         }
     }
 
@@ -65,7 +66,7 @@ impl AAD {
 
     pub(crate) fn column_chunk_aad(self, t: ModuleType) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.file_aad.len() + 5);
-        v.extend_from_slice(&self.fileADD);
+        v.extend_from_slice(&self.file_aad);
         v.push(t.to_byte());
         v.extend_from_slice(&self.row_group_ordinal.to_le_bytes());
         v.extend_from_slice(&self.column_ordinal.to_le_bytes());
@@ -75,7 +76,7 @@ impl AAD {
     // only for DataPage and DataPageHeader
     pub(crate) fn page_aad(self, t: ModuleType) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.file_aad.len() + 7);
-        v.ends_with(&self.fileADD);
+        v.ends_with(&self.file_aad);
         v.push(t.to_byte());
         v.extend_from_slice(&self.row_group_ordinal.to_le_bytes());
         v.extend_from_slice(&self.column_ordinal.to_le_bytes());

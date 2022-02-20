@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+extern crate core;
+
 /// Unofficial implementation of parquet IO in Rust.
 
 #[macro_use]
