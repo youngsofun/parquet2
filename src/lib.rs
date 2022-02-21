@@ -23,6 +23,7 @@ pub use streaming_decompression::FallibleStreamingIterator;
 
 const FOOTER_SIZE: u64 = 8;
 const PARQUET_MAGIC: [u8; 4] = [b'P', b'A', b'R', b'1'];
+const PARQUET_MAGIC_EF: [u8; 4] = [b'P', b'A', b'R', b'E'];
 
 /// The number of bytes read at the end of the parquet file on first read
 const DEFAULT_FOOTER_READ_SIZE: u64 = 64 * 1024;

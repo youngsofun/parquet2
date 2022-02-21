@@ -7,7 +7,7 @@ use parquet_format_async_temp::thrift::protocol::{
     TOutputStreamProtocol,
 };
 use parquet_format_async_temp::thrift::Result as ThriftResult;
-use parquet_format_async_temp::{ColumnChunk, FileMetaData, PageHeader};
+use parquet_format_async_temp::{ColumnChunk, FileCryptoMetaData, FileMetaData, PageHeader};
 use std::io::{Read, Write};
 
 #[async_trait]
@@ -58,6 +58,7 @@ macro_rules! define_thrift_impl {
 define_thrift_impl!(PageHeader);
 define_thrift_impl!(ColumnChunk);
 define_thrift_impl!(FileMetaData);
+define_thrift_impl!(FileCryptoMetaData);
 
 pub fn read_from_thrift<T: ThriftType, R: Read>(reader: &mut R) -> Result<T> {
     let mut protocol = TCompactInputProtocol::new(reader);
